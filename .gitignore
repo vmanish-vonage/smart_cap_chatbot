@@ -1,0 +1,5 @@
+.idea
+.venv
+*.duckdb
+.env
+__pycache__
