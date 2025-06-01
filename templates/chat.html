@@ -53,6 +53,11 @@
                         <button class="btn btn-primary" onclick="sendMessage()">Send</button>
                     </div>
                 </div>
+                {% if session.get("api_key") %}
+                <div class="card-footer text-end">
+                    <a href="/logout" class="btn btn-secondary">Logout</a>
+                </div>
+                {% endif %}
             </div>
             <p class="text-center mt-3 text-muted">© Vonage Business Communications</p>
         </div>
@@ -102,27 +107,4 @@
         const chatBox = document.getElementById("chatBox");
         const div = document.createElement("div");
         div.className = sender === "user" ? "user-msg text-end" : "bot-msg";
-        div.innerHTML = `<div class="msg-bubble">${text}</div>`;
-        chatBox.appendChild(div);
-        chatBox.scrollTop = chatBox.scrollHeight;
-    }
-
-    function addLoadingMessage() {
-        const chatBox = document.getElementById("chatBox");
-        const div = document.createElement("div");
-        div.className = "loading-msg";
-        div.innerHTML = `<div class="msg-bubble">Typing...</div>`;
-        chatBox.appendChild(div);
-        chatBox.scrollTop = chatBox.scrollHeight;
-        return div;
-    }
-
-    function removeLoadingMessage() {
-        if (loadingDiv) {
-            loadingDiv.remove();
-            loadingDiv = null;
-        }
-    }
-</script>
-</body>
-</html>
+        div.innerHTML
