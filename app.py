@@ -1,10 +1,12 @@
 import duckdb
 import io
+import re
+import json
 from flask import Flask, render_template, request, redirect, session, jsonify, g
 from lp_solver import allocate_customer_capacity
 
 from flask_session import Session
-from llm_client import call_llm_api
+from llm_client import call_llm_api, generate_formatted_summary
 from scheduler import start_refresh_signature_scheduler, start_preprocess_scheduler
 from dotenv import load_dotenv
 
@@ -75,8 +77,36 @@ def chat_message():
             "content": content
         })
 
-    response = call_llm_api(session["api_key"], fixed_messages)
-    return jsonify({"reply": response})
+    response_text = call_llm_api(session["api_key"], fixed_messages)
+    trigger, allocation_data = extract_allocation_data(response_text)
+    if trigger == "WE_ARE_READY_TO_ALLOCATE":
+        if not allocation_data:
+            return jsonify(
+                {"reply": "⚠️ I received the allocation trigger but couldn't parse the data. Please try again."})
+
+        # Call allocator
+        result = allocate_capacity_helper(session["api_key"], allocation_data, get_db())
+
+        if result["status"] != "success":
+            return jsonify({"reply": f"❌ Allocation failed: {result.get('message', 'Unknown error')}"})
+
+        # Optionally insert allocation record into DB here
+
+        # Build a reply summary
+        summary = f"""✅ Allocation successful!
+    - API Key of Customer: {session.get("api_key")}    
+    - TPS Allocated: {result['total_allocated_tps']}
+    - Destinations: {", ".join(allocation_data["destinations"])}
+    - Peak Window: {allocation_data.get("peak_window", "N/A")}
+    - Peak TPS: {allocation_data.get("peak_tps", "N/A")}
+    - Weekly Volume: {allocation_data.get("traffic_volume", "N/A")}
+    ###"""
+
+        llm_generated_summary = generate_formatted_summary(session.get("api_key"), summary)
+
+        return jsonify({"reply": llm_generated_summary})
+
+    return jsonify({"reply": response_text})
 
 @app.route("/logout")
 def logout():
@@ -109,6 +139,36 @@ def admin_dashboard():
 
     return render_template("admin_dashboard.html", graph_html=graph_html)
 
+def allocate_capacity_helper(api_key, allocation_data, db_connection=None):
+    required_keys = {"requested_tps", "destinations", "traffic_volume", "peak_window", "peak_tps"}
+
+    if not required_keys.issubset(allocation_data):
+        return {
+            "status": "failure",
+            "message": "Missing required fields"
+        }
+
+    result = allocate_customer_capacity(api_key, allocation_data)
+
+    if result["status"] in {"failure", "error"}:
+        # Optional: Save failure record as well
+        if db_connection:
+            save_allocation_record(db_connection, api_key, allocation_data, {}, status="failure")
+        return {
+            "status": "failure",
+            "message": result.get("message", "No feasible allocation found")
+        }
+
+    # Save success record if DB connection is provided
+    if db_connection:
+        save_allocation_record(db_connection, api_key, allocation_data, result["allocations"], status="success")
+
+    return {
+        "status": "success",
+        "allocations": result["allocations"],
+        "total_allocated_tps": result["total_allocated_tps"]
+    }
+
 @app.route("/api/allocate", methods=["POST"])
 def allocate_capacity():
     data = request.get_json()
@@ -128,6 +188,56 @@ def allocate_capacity():
         "total_allocated": result["total_allocated_tps"]
     })
 
+def extract_allocation_data(llm_response: str):
+    # Check if trigger exists
+    if "WE_ARE_READY_TO_ALLOCATE" not in llm_response:
+        return None, None
+
+    # Extract JSON block using regex
+    try:
+        json_block = re.search(r"\{.*?\}", llm_response, re.DOTALL).group(0)
+        allocation_data = json.loads(json_block)
+        return "WE_ARE_READY_TO_ALLOCATE", allocation_data
+    except Exception as e:
+        print(f"Failed to parse allocation JSON: {e}")
+        return "WE_ARE_READY_TO_ALLOCATE", None
+
+
+def save_allocation_record(db_connection, api_key, allocation_data, allocations, status="success"):
+    """
+    Save the allocation record into the 'allocations' table.
+
+    Parameters:
+        db_connection: sqlite3.Connection object
+        api_key: str, customer API key
+        allocation_data: dict, contains requested_tps, destinations, traffic_volume, peak_window, peak_tps
+        allocations: dict or list, the actual allocation details to be saved as JSON
+        status: str, allocation status, e.g. "success" or "failure"
+    """
+
+    allocation_description = json.dumps(allocations)
+    traffic_volume = int(allocation_data.get('traffic_volume') or 0)
+
+    with db_connection:
+        db_connection.execute("""
+            INSERT INTO allocations (
+                customer_api_key,
+                requested_tps,
+                requested_destinations,
+                requested_volume,
+                requested_peak_traffic_time,
+                allocation_status,
+                allocation_description
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            api_key,
+            int(allocation_data.get('requested_tps', 0)),
+            json.dumps(allocation_data.get('destinations', [])),  # store as JSON string
+            traffic_volume,
+            allocation_data.get('peak_window', '0-23'),
+            status,
+            allocation_description
+        ))
 
     # import json
 
