@@ -140,7 +140,7 @@ def admin_dashboard():
     return render_template("admin_dashboard.html", graph_html=graph_html)
 
 def allocate_capacity_helper(api_key, allocation_data, db_connection=None):
-    required_keys = {"requested_tps", "destinations", "traffic_volume", "peak_window", "peak_tps"}
+    required_keys = {"requested_tps", "destinations", "peak_window", "peak_tps"}
 
     if not required_keys.issubset(allocation_data):
         return {
@@ -153,7 +153,7 @@ def allocate_capacity_helper(api_key, allocation_data, db_connection=None):
     if result["status"] in {"failure", "error"}:
         # Optional: Save failure record as well
         if db_connection:
-            save_allocation_record(db_connection, api_key, allocation_data, {}, status="failure")
+            save_allocation_record(db_connection, api_key, allocation_data, [{}], status="failure")
         return {
             "status": "failure",
             "message": result.get("message", "No feasible allocation found")
@@ -161,7 +161,9 @@ def allocate_capacity_helper(api_key, allocation_data, db_connection=None):
 
     # Save success record if DB connection is provided
     if db_connection:
-        save_allocation_record(db_connection, api_key, allocation_data, result["allocations"], status="success")
+        with db_connection:
+            save_allocation_record(db_connection, api_key, allocation_data, result["allocations"], status="success")
+            update_allocated_tps_for_customer(api_key, allocation_data.get('requested_tps'))
 
     return {
         "status": "success",
@@ -173,7 +175,7 @@ def allocate_capacity_helper(api_key, allocation_data, db_connection=None):
 def allocate_capacity():
     data = request.get_json()
 
-    required_keys = {"requested_tps", "destinations", "traffic_volume", "peak_window", "peak_tps"}
+    required_keys = {"requested_tps", "destinations", "peak_window", "peak_tps"}
     if not required_keys.issubset(data):
         return jsonify({"error": "Missing required fields"}), 400
 
@@ -238,6 +240,25 @@ def save_allocation_record(db_connection, api_key, allocation_data, allocations,
             status,
             allocation_description
         ))
+
+def update_allocated_tps_for_customer(api_key, tps_assigned):
+    """
+    Increment the allocated_tps for a customer in the customer_info table.
+
+    Parameters:
+=        api_key: str, customer API key
+        tps_assigned: int or float, TPS to add to the customer's allocated_tps
+    """
+    db_connection = duckdb.connect("traffic_data.duckdb")
+    if not isinstance(tps_assigned, (int, float)):
+        raise ValueError("tps_assigned must be a number")
+
+    with db_connection:
+        db_connection.execute("""
+            UPDATE customer_info
+            SET allocated_tps = COALESCE(allocated_tps, 0) + ?
+            WHERE customer_api_key = ?
+        """, (tps_assigned, api_key))
 
     # import json
 

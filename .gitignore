@@ -4,3 +4,4 @@
 .env
 __pycache__
 traffic_data.duckdb
+traffic_data.duckdb.wal

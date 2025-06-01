@@ -103,7 +103,7 @@ def allocate_customer_capacity(customer_api_key, request: dict):
     result = linprog(c=c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
 
     if not result.success:
-        return {'status': 'error', 'message': 'Could not allocate TPS under current constraints'}
+        return {'status': 'error', 'message': 'Could not allocate TPS under given constraints'}
 
     allocations = []
     for idx, tps in enumerate(result.x):
