@@ -130,11 +130,6 @@ def allocate_capacity():
 
 
     # import json
-    # allocation_description = json.dumps({
-    #     "allocation": allocations,
-    #     "status": "success",
-    #     "total_allocated": round(float(sum(result.x)), 2)
-    # })
 
     # OR allocation_description = json.dumps(allocations)
     # con.execute("""

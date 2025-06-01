@@ -289,81 +289,101 @@ def preprocess_data():
                  cpd.actual_peak_hour, cpd.peak_tps, cpd.avg_tps
     ),
 
+    carrier_allocated_tps AS (
+        SELECT 
+            carrier_name,
+            COALESCE(SUM(allocated_tps), 0) as total_allocated_tps
+        FROM (
+            SELECT 
+                JSON_EXTRACT(value, '$.carrier') as carrier_name,
+                CAST(JSON_EXTRACT(value, '$.allocated_tps') AS REAL) as allocated_tps
+            FROM allocations a,
+            JSON_EACH(CAST(a.allocation_description AS JSON))
+            WHERE a.allocation_status = 'Approved'
+        ) allocated_data
+        GROUP BY carrier_name
+    ),
+
     carrier_analysis AS (
-        SELECT *,
+        SELECT cts.*,
             -- Calculate ACTUAL peak start and end times (8-hour window around peak hour)
-            GREATEST(0, actual_peak_hour - 4) as actual_peak_start_time,
-            LEAST(23, actual_peak_hour + 3) as actual_peak_end_time,
+            GREATEST(0, cts.actual_peak_hour - 4) as actual_peak_start_time,
+            LEAST(23, cts.actual_peak_hour + 3) as actual_peak_end_time,
 
-            -- Calculate allocatable TPS (available capacity) - converted to INT
-            CAST(GREATEST(0, allowed_tps - avg_tps_actual) AS INTEGER) as allocatable_tps,
+            -- Calculate allocatable TPS (available capacity) - subtract allocated TPS
+            CAST(GREATEST(0, cts.allowed_tps - cts.avg_tps_actual - COALESCE(cat.total_allocated_tps, 0)) AS INTEGER) as allocatable_tps,
 
-            -- Capacity utilization
+            -- Capacity utilization (now includes allocated TPS)
             CASE 
-                WHEN avg_tps_actual > allowed_tps * 0.9 THEN 'OVER_CAPACITY'
-                WHEN avg_tps_actual > allowed_tps * 0.7 THEN 'HIGH_UTILIZATION'
-                WHEN avg_tps_actual > allowed_tps * 0.3 THEN 'MEDIUM_UTILIZATION'
+                WHEN cts.avg_tps_actual + COALESCE(cat.total_allocated_tps, 0) > cts.allowed_tps * 0.9 THEN 'OVER_CAPACITY'
+                WHEN cts.avg_tps_actual + COALESCE(cat.total_allocated_tps, 0) > cts.allowed_tps * 0.7 THEN 'HIGH_UTILIZATION'
+                WHEN cts.avg_tps_actual + COALESCE(cat.total_allocated_tps, 0) > cts.allowed_tps * 0.3 THEN 'MEDIUM_UTILIZATION'
                 ELSE 'LOW_UTILIZATION'
             END as capacity_utilization_level,
 
             -- Performance rating
             CASE 
-                WHEN delivery_success_rate > 95 THEN 'EXCELLENT'
-                WHEN delivery_success_rate > 90 THEN 'GOOD'
-                WHEN delivery_success_rate > 80 THEN 'AVERAGE'
+                WHEN cts.delivery_success_rate > 95 THEN 'EXCELLENT'
+                WHEN cts.delivery_success_rate > 90 THEN 'GOOD'
+                WHEN cts.delivery_success_rate > 80 THEN 'AVERAGE'
                 ELSE 'POOR'
             END as performance_rating,
 
             -- Business hours vs off hours ratio
-            business_hours_traffic * 100.0 / NULLIF(total_transactions_handled, 0) as business_hours_percentage,
+            cts.business_hours_traffic * 100.0 / NULLIF(cts.total_transactions_handled, 0) as business_hours_percentage,
 
             -- Days active
             CASE 
-                WHEN first_transaction_date IS NOT NULL 
-                THEN DATE_DIFF('day', first_transaction_date, last_transaction_date) + 1 
+                WHEN cts.first_transaction_date IS NOT NULL 
+                THEN DATE_DIFF('day', cts.first_transaction_date, cts.last_transaction_date) + 1 
                 ELSE 0 
             END as days_active,
 
             -- Average daily transactions
             CASE 
-                WHEN first_transaction_date IS NOT NULL AND total_transactions_handled > 0
-                THEN total_transactions_handled / (DATE_DIFF('day', first_transaction_date, last_transaction_date) + 1.0)
+                WHEN cts.first_transaction_date IS NOT NULL AND cts.total_transactions_handled > 0
+                THEN cts.total_transactions_handled / (DATE_DIFF('day', cts.first_transaction_date, cts.last_transaction_date) + 1.0)
                 ELSE 0
             END as avg_daily_transactions,
 
             -- Determine actual peak period
             CASE 
-                WHEN total_transactions_handled = 0 THEN 'NO_TRAFFIC'
-                WHEN night_traffic_0_5 = GREATEST(night_traffic_0_5, morning_traffic_6_11, afternoon_traffic_12_17, evening_traffic_18_23) THEN 'NIGHT_0_5'
-                WHEN morning_traffic_6_11 = GREATEST(night_traffic_0_5, morning_traffic_6_11, afternoon_traffic_12_17, evening_traffic_18_23) THEN 'MORNING_6_11'
-                WHEN afternoon_traffic_12_17 = GREATEST(night_traffic_0_5, morning_traffic_6_11, afternoon_traffic_12_17, evening_traffic_18_23) THEN 'AFTERNOON_12_17'
+                WHEN cts.total_transactions_handled = 0 THEN 'NO_TRAFFIC'
+                WHEN cts.night_traffic_0_5 = GREATEST(cts.night_traffic_0_5, cts.morning_traffic_6_11, cts.afternoon_traffic_12_17, cts.evening_traffic_18_23) THEN 'NIGHT_0_5'
+                WHEN cts.morning_traffic_6_11 = GREATEST(cts.night_traffic_0_5, cts.morning_traffic_6_11, cts.afternoon_traffic_12_17, cts.evening_traffic_18_23) THEN 'MORNING_6_11'
+                WHEN cts.afternoon_traffic_12_17 = GREATEST(cts.night_traffic_0_5, cts.morning_traffic_6_11, cts.afternoon_traffic_12_17, cts.evening_traffic_18_23) THEN 'AFTERNOON_12_17'
                 ELSE 'EVENING_18_23'
             END as actual_peak_period,
+
+            -- Store allocated TPS for reference
+            COALESCE(cat.total_allocated_tps, 0) as total_allocated_tps,
 
             -- Create actual peak times JSON with computed values
             JSON_OBJECT(
                 'traffic_start_time', 0,
                 'traffic_end_time', 23,
-                'actual_peak_start_time', GREATEST(0, actual_peak_hour - 4),
-                'actual_peak_end_time', LEAST(23, actual_peak_hour + 3),
-                'actual_peak_hour', actual_peak_hour,
-                'peak_tps', peak_tps,
-                'avg_tps', avg_tps,
+                'actual_peak_start_time', GREATEST(0, cts.actual_peak_hour - 4),
+                'actual_peak_end_time', LEAST(23, cts.actual_peak_hour + 3),
+                'actual_peak_hour', cts.actual_peak_hour,
+                'peak_tps', cts.peak_tps,
+                'avg_tps', cts.avg_tps,
                 'actual_peak_period', 
                     CASE 
-                        WHEN total_transactions_handled = 0 THEN 'NO_TRAFFIC'
-                        WHEN night_traffic_0_5 = GREATEST(night_traffic_0_5, morning_traffic_6_11, afternoon_traffic_12_17, evening_traffic_18_23) THEN 'NIGHT_0_5'
-                        WHEN morning_traffic_6_11 = GREATEST(night_traffic_0_5, morning_traffic_6_11, afternoon_traffic_12_17, evening_traffic_18_23) THEN 'MORNING_6_11'
-                        WHEN afternoon_traffic_12_17 = GREATEST(night_traffic_0_5, morning_traffic_6_11, afternoon_traffic_12_17, evening_traffic_18_23) THEN 'AFTERNOON_12_17'
+                        WHEN cts.total_transactions_handled = 0 THEN 'NO_TRAFFIC'
+                        WHEN cts.night_traffic_0_5 = GREATEST(cts.night_traffic_0_5, cts.morning_traffic_6_11, cts.afternoon_traffic_12_17, cts.evening_traffic_18_23) THEN 'NIGHT_0_5'
+                        WHEN cts.morning_traffic_6_11 = GREATEST(cts.night_traffic_0_5, cts.morning_traffic_6_11, cts.afternoon_traffic_12_17, cts.evening_traffic_18_23) THEN 'MORNING_6_11'
+                        WHEN cts.afternoon_traffic_12_17 = GREATEST(cts.night_traffic_0_5, cts.morning_traffic_6_11, cts.afternoon_traffic_12_17, cts.evening_traffic_18_23) THEN 'AFTERNOON_12_17'
                         ELSE 'EVENING_18_23'
                     END,
-                'night_traffic_pct', ROUND(night_traffic_0_5 * 100.0 / NULLIF(total_transactions_handled, 0), 2),
-                'morning_traffic_pct', ROUND(morning_traffic_6_11 * 100.0 / NULLIF(total_transactions_handled, 0), 2),
-                'afternoon_traffic_pct', ROUND(afternoon_traffic_12_17 * 100.0 / NULLIF(total_transactions_handled, 0), 2),
-                'evening_traffic_pct', ROUND(evening_traffic_18_23 * 100.0 / NULLIF(total_transactions_handled, 0), 2)
+                'night_traffic_pct', ROUND(cts.night_traffic_0_5 * 100.0 / NULLIF(cts.total_transactions_handled, 0), 2),
+                'morning_traffic_pct', ROUND(cts.morning_traffic_6_11 * 100.0 / NULLIF(cts.total_transactions_handled, 0), 2),
+                'afternoon_traffic_pct', ROUND(cts.afternoon_traffic_12_17 * 100.0 / NULLIF(cts.total_transactions_handled, 0), 2),
+                'evening_traffic_pct', ROUND(cts.evening_traffic_18_23 * 100.0 / NULLIF(cts.total_transactions_handled, 0), 2),
+                'total_allocated_tps', COALESCE(cat.total_allocated_tps, 0)
             ) as actual_peak_times
 
-        FROM carrier_traffic_stats
+        FROM carrier_traffic_stats cts
+        LEFT JOIN carrier_allocated_tps cat ON cts.carrier_name = cat.carrier_name
     )
 
     SELECT 
@@ -371,7 +391,8 @@ def preprocess_data():
         email,
         allowed_tps,
         avg_tps_actual,
-        allocatable_tps,  -- NOW INTEGER
+        allocatable_tps,  -- NOW INTEGER and accounts for allocated TPS
+        total_allocated_tps,  -- NEW: Shows how much TPS is already allocated
         total_transactions_handled,
         successful_deliveries,
         failed_deliveries,
@@ -426,6 +447,7 @@ def preprocess_data():
         "SELECT carrier_name, actual_peak_hour, actual_peak_start_time, actual_peak_end_time, peak_tps, allocatable_tps, night_traffic_pct, morning_traffic_pct, afternoon_traffic_pct, evening_traffic_pct FROM carrier_profile LIMIT 3").df())
 
     conn.close()
+
     print("Done Preprocessing")
     return True
 
