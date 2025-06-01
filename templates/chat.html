@@ -50,7 +50,7 @@
                     <div id="chatBox"></div>
                     <div class="mt-3 d-flex">
                         <input type="text" id="userInput" class="form-control me-2" placeholder="Type your message" autocomplete="off" />
-                        <button class="btn btn-primary" onclick="sendMessage()">Send</button>
+                        <button class="btn btn-primary" id="sendBtn">Send</button>
                     </div>
                 </div>
                 {% if session.get("api_key") %}
@@ -68,12 +68,31 @@
     let messages = [];
     let loadingDiv = null;
 
-    document.getElementById("userInput").addEventListener("keydown", function(event) {
-        if (event.key === "Enter") {
-            event.preventDefault();
-            sendMessage();
+    function updateChatBox(sender, text) {
+        const chatBox = document.getElementById("chatBox");
+        const div = document.createElement("div");
+        div.className = sender === "user" ? "user-msg text-end" : "bot-msg";
+        div.innerHTML = `<div class="msg-bubble">${text}</div>`;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function addLoadingMessage() {
+        const chatBox = document.getElementById("chatBox");
+        const div = document.createElement("div");
+        div.className = "loading-msg";
+        div.innerHTML = `<div class="msg-bubble">Typing...</div>`;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+        return div;
+    }
+
+    function removeLoadingMessage() {
+        if (loadingDiv) {
+            loadingDiv.remove();
+            loadingDiv = null;
         }
-    });
+    }
 
     async function sendMessage() {
         const input = document.getElementById("userInput");
@@ -89,9 +108,10 @@
         try {
             const res = await fetch("/chat/message", {
                 method: "POST",
-                headers: {"Content-Type": "application/json"},
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ messages })
             });
+
             const data = await res.json();
             const reply = data.reply;
             messages.push({ role: "assistant", content: reply });
@@ -103,8 +123,14 @@
         }
     }
 
-    function updateChatBox(sender, text) {
-        const chatBox = document.getElementById("chatBox");
-        const div = document.createElement("div");
-        div.className = sender === "user" ? "user-msg text-end" : "bot-msg";
-        div.innerHTML
+    document.getElementById("sendBtn").addEventListener("click", sendMessage);
+
+    document.getElementById("userInput").addEventListener("keydown", function(event) {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            sendMessage();
+        }
+    });
+</script>
+</body>
+</html>
