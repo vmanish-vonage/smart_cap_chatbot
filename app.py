@@ -1,15 +1,16 @@
-import os
-import requests
 import duckdb
 import io
 from flask import Flask, render_template, request, redirect, session, jsonify, g
+from lp_solver import allocate_customer_capacity
+
 from flask_session import Session
 from llm_client import call_llm_api
-from scheduler import start_scheduler
+from scheduler import start_refresh_signature_scheduler, start_preprocess_scheduler
 from dotenv import load_dotenv
 
 load_dotenv()
 
+preprocessed_data = None
 app = Flask(__name__)
 app.secret_key = "super_secret"
 app.config["SESSION_TYPE"] = "filesystem"
@@ -108,6 +109,26 @@ def admin_dashboard():
 
     return render_template("admin_dashboard.html", graph_html=graph_html)
 
+@app.route("/api/allocate", methods=["POST"])
+def allocate_capacity():
+    data = request.get_json()
+
+    required_keys = {"requested_tps", "destinations", "traffic_volume", "peak_window", "peak_tps"}
+    if not required_keys.issubset(data):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    result = allocate_customer_capacity(session.get("api_key"), data)
+
+    if result["status"] == "failure" or result["status"] == "error":
+        return jsonify({"status": "failure", "message": result.get("message", "No feasible allocation found")}), 400
+
+    return jsonify({
+        "status": "success",
+        "allocation": result["allocations"],
+        "total_allocated": result["total_allocated_tps"]
+    })
+
 if __name__ == "__main__":
-    start_scheduler()
+    start_refresh_signature_scheduler()
+    start_preprocess_scheduler()
     app.run(debug=False, threaded=False)

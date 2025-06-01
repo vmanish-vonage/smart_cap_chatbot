@@ -3,3 +3,4 @@
 *.duckdb
 .env
 __pycache__
+traffic_data.duckdb

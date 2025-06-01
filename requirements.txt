@@ -6,3 +6,4 @@ apscheduler
 duckdb
 plotly
 pandas
+scipy
