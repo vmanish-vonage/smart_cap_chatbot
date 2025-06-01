@@ -41,7 +41,7 @@ def call_llm_api(api_key_from_session, messages):
 
     try:
         print("Request Sent: {}", payload)
-        response = requests.post(api_url, json=payload, headers=headers)
+        response = requests.post(api_url, json=payload, headers=headers, timeout=(5, 5))
         response.raise_for_status()
         return response.json().get("response", "LLM response missing.")
     except requests.exceptions.RequestException as e:

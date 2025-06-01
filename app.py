@@ -1,17 +1,31 @@
-from flask import Flask, render_template, request, redirect, session, jsonify
+import plotly.express as px
+import duckdb
+import io
+from flask import Flask, render_template, request, redirect, session, jsonify, g
 from flask_session import Session
 from llm_client import call_llm_api
 from scheduler import start_scheduler
-
 from dotenv import load_dotenv
 
 load_dotenv()  # Load environment variables from .env
-
 
 app = Flask(__name__)
 app.secret_key = "super_secret"
 app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
+
+
+def get_db():
+    if "db" not in g:
+        g.db = duckdb.connect("traffic_data.duckdb")
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exception):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -46,12 +60,9 @@ def chat_message():
         role = msg.get("role")
         content = msg.get("content")
 
-        # If content is a string, wrap it as a list of one dict {"text": ...}
         if isinstance(content, str):
             content = [{"text": content}]
-        # If content is already a list, leave as is
         elif not isinstance(content, list):
-            # If malformed or missing, default to empty list
             content = []
 
         fixed_messages.append({
@@ -69,6 +80,42 @@ def logout():
     return redirect("/")
 
 
+# ----------------------------
+# Admin Dashboard
+# ----------------------------
+
+@app.route("/admin", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "POST":
+        password = request.form["password"]
+        if password == "123456":
+            session["admin_authenticated"] = True
+            return redirect("/admin/dashboard")
+        return "Invalid admin password", 401
+    return render_template("admin_login.html")
+
+
+@app.route("/admin/dashboard")
+def admin_dashboard():
+    if not session.get("admin_authenticated"):
+        return redirect("/admin")
+
+    conn = get_db()
+    df = conn.execute("SELECT * FROM allocations").fetchdf()
+
+    # Generate bar graph for allocation statuses
+    status_counts = df["allocation_status"].value_counts().reset_index()
+    status_counts.columns = ["status", "count"]
+    fig = px.bar(status_counts, x="status", y="count", title="Allocation Status Overview")
+
+    buffer = io.StringIO()
+    fig.write_html(buffer, include_plotlyjs='cdn')
+    graph_html = buffer.getvalue()
+
+    return render_template("admin_dashboard.html", graph_html=graph_html)
+
+
 if __name__ == "__main__":
     start_scheduler()
-    app.run(debug=True)
+    # Use single-threaded mode to avoid DuckDB threading issues
+    app.run(debug=False, threaded=False)
