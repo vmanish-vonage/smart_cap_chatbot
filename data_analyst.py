@@ -18,7 +18,32 @@ def preprocess_data():
     # Create customer_profile table with actual contract analysis
     create_customer_profile_query = """
     CREATE OR REPLACE TABLE customer_profile AS
-    WITH customer_traffic_stats AS (
+    WITH customer_hourly_traffic AS (
+        SELECT 
+            ct.customer_api_key,
+            EXTRACT(hour FROM ct.timestamp) as hour,
+            COUNT(*) as transactions_per_hour,
+            COUNT(CASE WHEN ct.status = 'SUCCESS' THEN 1 END) as successful_per_hour
+        FROM customer_traffic ct
+        GROUP BY ct.customer_api_key, EXTRACT(hour FROM ct.timestamp)
+    ),
+
+    customer_peak_detection AS (
+        SELECT 
+            customer_api_key,
+            -- Find the hour with maximum traffic (actual peak hour)
+            (SELECT hour FROM customer_hourly_traffic cht2 
+             WHERE cht2.customer_api_key = cht.customer_api_key 
+             ORDER BY transactions_per_hour DESC LIMIT 1) as actual_peak_hour,
+            -- Get max transactions in any hour converted to TPS (peak_tps)
+            MAX(transactions_per_hour) / 3600.0 as peak_tps,
+            -- Calculate average transactions per hour converted to TPS
+            AVG(transactions_per_hour) / 3600.0 as avg_tps
+        FROM customer_hourly_traffic cht
+        GROUP BY customer_api_key
+    ),
+
+    customer_traffic_stats AS (
         SELECT 
             ct.customer_api_key,
             ci.customer_name,
@@ -31,11 +56,22 @@ def preprocess_data():
             COUNT(CASE WHEN status = 'FAILED' THEN 1 END) as failed_transactions,
             COUNT(CASE WHEN status = 'SUCCESS' THEN 1 END) * 100.0 / COUNT(*) as success_rate,
 
-            -- Extract hour from timestamp for traffic pattern analysis
+            -- Get actual peak hour and peak TPS from peak detection
+            cpd.actual_peak_hour,
+            cpd.peak_tps,
+            cpd.avg_tps,
+
+            -- Calculate peak period traffic (8-hour window around peak hour)
+            COUNT(CASE WHEN EXTRACT(hour FROM timestamp) BETWEEN 
+                GREATEST(0, cpd.actual_peak_hour - 4) AND 
+                LEAST(23, cpd.actual_peak_hour + 3) 
+                THEN 1 END) as actual_peak_period_transactions,
+
+            -- Extract hour from timestamp for traffic pattern analysis with CONTRACT times
             COUNT(CASE WHEN EXTRACT(hour FROM timestamp) BETWEEN 
                 CAST(JSON_EXTRACT(ci.contract, '$.peak_start_time') AS INTEGER) AND 
                 CAST(JSON_EXTRACT(ci.contract, '$.peak_end_time') AS INTEGER) 
-                THEN 1 END) as peak_hour_transactions,
+                THEN 1 END) as contract_peak_hour_transactions,
 
             COUNT(CASE WHEN EXTRACT(hour FROM timestamp) BETWEEN 
                 CAST(JSON_EXTRACT(ci.contract, '$.traffic_start_time') AS INTEGER) AND 
@@ -50,9 +86,6 @@ def preprocess_data():
             MODE() WITHIN GROUP (ORDER BY ct.carrier_name) as primary_carrier,
             MODE() WITHIN GROUP (ORDER BY ct.destination_country) as primary_country,
 
-            -- Actual peak times analysis - find the hour with most traffic
-            MODE() WITHIN GROUP (ORDER BY EXTRACT(hour FROM timestamp)) as actual_peak_hour,
-
             -- Calculate traffic distribution across hours
             COUNT(CASE WHEN EXTRACT(hour FROM timestamp) BETWEEN 0 AND 5 THEN 1 END) as night_traffic_0_5,
             COUNT(CASE WHEN EXTRACT(hour FROM timestamp) BETWEEN 6 AND 11 THEN 1 END) as morning_traffic_6_11,
@@ -64,7 +97,9 @@ def preprocess_data():
 
         FROM customer_traffic ct
         JOIN customer_info ci ON ct.customer_api_key = ci.customer_api_key
-        GROUP BY ct.customer_api_key, ci.customer_name, ci.tier, ci.allocated_tps, ci.contract
+        JOIN customer_peak_detection cpd ON ct.customer_api_key = cpd.customer_api_key
+        GROUP BY ct.customer_api_key, ci.customer_name, ci.tier, ci.allocated_tps, ci.contract, 
+                 cpd.actual_peak_hour, cpd.peak_tps, cpd.avg_tps
     ),
 
     customer_analysis AS (
@@ -83,8 +118,8 @@ def preprocess_data():
                 ELSE 'LOW_UTILIZATION'
             END as tps_utilization_level,
 
-            -- Peak hour usage pattern
-            peak_hour_transactions * 100.0 / total_transactions as peak_hour_percentage,
+            -- Peak hour usage pattern (using ACTUAL peak period)
+            actual_peak_period_transactions * 100.0 / total_transactions as peak_period_percentage,
 
             -- Calculate days active
             DATE_DIFF('day', first_transaction, last_transaction) + 1 as days_active,
@@ -100,6 +135,10 @@ def preprocess_data():
                 ELSE 'EVENING_18_23'
             END as actual_peak_period,
 
+            -- Calculate ACTUAL peak start and end times (8-hour window around peak hour)
+            GREATEST(0, actual_peak_hour - 4) as actual_peak_start_time,
+            LEAST(23, actual_peak_hour + 3) as actual_peak_end_time,
+
             -- Create actual contract JSON based on observed behavior
             JSON_OBJECT(
                 'actual_traffic_start_time', 
@@ -110,8 +149,11 @@ def preprocess_data():
                     CASE WHEN total_transactions > 0 THEN 
                         (SELECT MAX(EXTRACT(hour FROM timestamp)) FROM customer_traffic ct2 WHERE ct2.customer_api_key = customer_api_key)
                     ELSE 23 END,
-                'actual_peak_start_time', actual_peak_hour,
-                'actual_peak_end_time', actual_peak_hour + 1,
+                'actual_peak_start_time', GREATEST(0, actual_peak_hour - 4),
+                'actual_peak_end_time', LEAST(23, actual_peak_hour + 3),
+                'actual_peak_hour', actual_peak_hour,
+                'peak_tps', peak_tps,
+                'avg_tps', avg_tps,
                 'actual_peak_period', actual_peak_period,
                 'contract_vs_actual_alignment', 
                     CASE 
@@ -138,7 +180,9 @@ def preprocess_data():
         success_rate,
         contract_compliance,
         tps_utilization_level,
-        peak_hour_percentage,
+        peak_period_percentage,
+        peak_tps,
+        avg_tps,
         carriers_used,
         countries_reached,
         primary_carrier,
@@ -156,18 +200,43 @@ def preprocess_data():
         CAST(JSON_EXTRACT(contract, '$.peak_start_time') AS INTEGER) as contract_peak_start,
         CAST(JSON_EXTRACT(contract, '$.peak_end_time') AS INTEGER) as contract_peak_end,
 
-        -- Extract actual contract details
-        CAST(JSON_EXTRACT(actual_contract, '$.actual_peak_start_time') AS INTEGER) as actual_peak_start,
-        CAST(JSON_EXTRACT(actual_contract, '$.actual_peak_end_time') AS INTEGER) as actual_peak_end,
+        -- Extract ACTUAL contract details (computed from traffic)
+        actual_peak_start_time,
+        actual_peak_end_time,
         JSON_EXTRACT(actual_contract, '$.contract_vs_actual_alignment') as peak_alignment
 
     FROM customer_analysis;
     """
 
-    # Create carrier_profile table with actual peak times analysis
+    # Create carrier_profile table with actual peak times analysis and allocatable_tps
     create_carrier_profile_query = """
     CREATE OR REPLACE TABLE carrier_profile AS
-    WITH carrier_traffic_stats AS (
+    WITH carrier_hourly_traffic AS (
+        SELECT 
+            ct.carrier_name,
+            EXTRACT(hour FROM ct.timestamp) as hour,
+            COUNT(*) as transactions_per_hour,
+            COUNT(CASE WHEN ct.status = 'SUCCESS' THEN 1 END) as successful_per_hour
+        FROM customer_traffic ct
+        GROUP BY ct.carrier_name, EXTRACT(hour FROM ct.timestamp)
+    ),
+
+    carrier_peak_detection AS (
+        SELECT 
+            carrier_name,
+            -- Find the hour with maximum traffic (actual peak hour)
+            (SELECT hour FROM carrier_hourly_traffic cht2 
+             WHERE cht2.carrier_name = cht.carrier_name 
+             ORDER BY transactions_per_hour DESC LIMIT 1) as actual_peak_hour,
+            -- Get max transactions in any hour converted to TPS (peak_tps)
+            MAX(transactions_per_hour) / 3600.0 as peak_tps,
+            -- Calculate average transactions per hour converted to TPS
+            AVG(transactions_per_hour) / 3600.0 as avg_tps
+        FROM carrier_hourly_traffic cht
+        GROUP BY carrier_name
+    ),
+
+    carrier_traffic_stats AS (
         SELECT 
             cc.carrier_name,
             cc.email,
@@ -176,13 +245,18 @@ def preprocess_data():
 
             -- Traffic statistics
             COALESCE(COUNT(ct.customer_api_key), 0) as total_transactions_handled,
-            COALESCE(COUNT(ct.customer_api_key), 0) / (24.0 * 60 * 60) as avg_tps_actual,
+            CAST(COALESCE(COUNT(ct.customer_api_key), 0) / (24.0 * 60 * 60) AS INTEGER) as avg_tps_actual,
             COALESCE(COUNT(CASE WHEN ct.status = 'SUCCESS' THEN 1 END), 0) as successful_deliveries,
             COALESCE(COUNT(CASE WHEN ct.status = 'FAILED' THEN 1 END), 0) as failed_deliveries,
             CASE 
                 WHEN COUNT(ct.customer_api_key) = 0 THEN 0
                 ELSE COUNT(CASE WHEN ct.status = 'SUCCESS' THEN 1 END) * 100.0 / COUNT(ct.customer_api_key)
             END as delivery_success_rate,
+
+            -- Get actual peak hour and peak TPS from peak detection
+            COALESCE(cpd.actual_peak_hour, 12) as actual_peak_hour,  -- Default to noon if no traffic
+            COALESCE(cpd.peak_tps, 0) as peak_tps,
+            COALESCE(cpd.avg_tps, 0) as avg_tps,
 
             -- Customer diversity
             COUNT(DISTINCT ct.customer_api_key) as unique_customers_served,
@@ -205,23 +279,25 @@ def preprocess_data():
             COUNT(CASE WHEN EXTRACT(hour FROM ct.timestamp) BETWEEN 12 AND 17 THEN 1 END) as afternoon_traffic_12_17,
             COUNT(CASE WHEN EXTRACT(hour FROM ct.timestamp) BETWEEN 18 AND 23 THEN 1 END) as evening_traffic_18_23,
 
-            -- Find actual peak hour
-            CASE 
-                WHEN COUNT(ct.customer_api_key) > 0 
-                THEN MODE() WITHIN GROUP (ORDER BY EXTRACT(hour FROM ct.timestamp))
-                ELSE NULL
-            END as actual_peak_hour,
-
             MIN(ct.timestamp) as first_transaction_date,
             MAX(ct.timestamp) as last_transaction_date
 
         FROM carrier_capacity cc
         LEFT JOIN customer_traffic ct ON cc.carrier_name = ct.carrier_name
-        GROUP BY cc.carrier_name, cc.email, cc.allowed_tps, cc.countries_supported
+        LEFT JOIN carrier_peak_detection cpd ON cc.carrier_name = cpd.carrier_name
+        GROUP BY cc.carrier_name, cc.email, cc.allowed_tps, cc.countries_supported,
+                 cpd.actual_peak_hour, cpd.peak_tps, cpd.avg_tps
     ),
 
     carrier_analysis AS (
         SELECT *,
+            -- Calculate ACTUAL peak start and end times (8-hour window around peak hour)
+            GREATEST(0, actual_peak_hour - 4) as actual_peak_start_time,
+            LEAST(23, actual_peak_hour + 3) as actual_peak_end_time,
+
+            -- Calculate allocatable TPS (available capacity) - converted to INT
+            CAST(GREATEST(0, allowed_tps - avg_tps_actual) AS INTEGER) as allocatable_tps,
+
             -- Capacity utilization
             CASE 
                 WHEN avg_tps_actual > allowed_tps * 0.9 THEN 'OVER_CAPACITY'
@@ -264,13 +340,15 @@ def preprocess_data():
                 ELSE 'EVENING_18_23'
             END as actual_peak_period,
 
-            -- Create actual peak times JSON
+            -- Create actual peak times JSON with computed values
             JSON_OBJECT(
                 'traffic_start_time', 0,
                 'traffic_end_time', 23,
-                'peak_start_time', COALESCE(actual_peak_hour, 12),
-                'peak_end_time', COALESCE(actual_peak_hour + 7, 19),  -- 8-hour peak window similar to contract example
+                'actual_peak_start_time', GREATEST(0, actual_peak_hour - 4),
+                'actual_peak_end_time', LEAST(23, actual_peak_hour + 3),
                 'actual_peak_hour', actual_peak_hour,
+                'peak_tps', peak_tps,
+                'avg_tps', avg_tps,
                 'actual_peak_period', 
                     CASE 
                         WHEN total_transactions_handled = 0 THEN 'NO_TRAFFIC'
@@ -293,6 +371,7 @@ def preprocess_data():
         email,
         allowed_tps,
         avg_tps_actual,
+        allocatable_tps,  -- NOW INTEGER
         total_transactions_handled,
         successful_deliveries,
         failed_deliveries,
@@ -310,11 +389,13 @@ def preprocess_data():
         countries_supported as supported_countries_list,
         actual_peak_hour,
         actual_peak_period,
+        peak_tps,  -- NEW: Max TPS (transactions per second)
+        avg_tps,  -- RENAMED from avg_tps_hourly
         actual_peak_times,
 
-        -- Extract peak times for easy access
-        CAST(JSON_EXTRACT(actual_peak_times, '$.peak_start_time') AS INTEGER) as peak_start_time,
-        CAST(JSON_EXTRACT(actual_peak_times, '$.peak_end_time') AS INTEGER) as peak_end_time,
+        -- Extract COMPUTED peak times for easy access
+        actual_peak_start_time,
+        actual_peak_end_time,
         CAST(JSON_EXTRACT(actual_peak_times, '$.night_traffic_pct') AS REAL) as night_traffic_pct,
         CAST(JSON_EXTRACT(actual_peak_times, '$.morning_traffic_pct') AS REAL) as morning_traffic_pct,
         CAST(JSON_EXTRACT(actual_peak_times, '$.afternoon_traffic_pct') AS REAL) as afternoon_traffic_pct,
@@ -336,19 +417,17 @@ def preprocess_data():
     print(conn.execute("DESCRIBE carrier_profile").df())
 
     # Show sample data
-    print("\n🔍 Sample Customer Profile Data (with actual contract):")
+    print("\n🔍 Sample Customer Profile Data (with computed peak times):")
     print(conn.execute(
-        "SELECT customer_name, tier, actual_peak_hour, actual_peak_period, peak_alignment, contract_compliance FROM customer_profile LIMIT 3").df())
+        "SELECT customer_name, tier, actual_peak_hour, actual_peak_start_time, actual_peak_end_time, peak_tps, peak_alignment, contract_compliance FROM customer_profile LIMIT 3").df())
 
-    print("\n🔍 Sample Carrier Profile Data (with peak times):")
+    print("\n🔍 Sample Carrier Profile Data (with computed peak times and allocatable TPS):")
     print(conn.execute(
-        "SELECT carrier_name, actual_peak_hour, actual_peak_period, night_traffic_pct, morning_traffic_pct, afternoon_traffic_pct, evening_traffic_pct FROM carrier_profile LIMIT 3").df())
+        "SELECT carrier_name, actual_peak_hour, actual_peak_start_time, actual_peak_end_time, peak_tps, allocatable_tps, night_traffic_pct, morning_traffic_pct, afternoon_traffic_pct, evening_traffic_pct FROM carrier_profile LIMIT 3").df())
 
     conn.close()
-
     print("Done Preprocessing")
     return True
-
 
 # # Example usage with enhanced analytics:
 # def example_usage():

@@ -128,6 +128,34 @@ def allocate_capacity():
         "total_allocated": result["total_allocated_tps"]
     })
 
+
+    # import json
+    # allocation_description = json.dumps({
+    #     "allocation": allocations,
+    #     "status": "success",
+    #     "total_allocated": round(float(sum(result.x)), 2)
+    # })
+
+    # OR allocation_description = json.dumps(allocations)
+    # con.execute("""
+    #     INSERT INTO allocations (
+    #         customer_api_key,
+    #         requested_tps,
+    #         requested_destinations,
+    #         requested_volume,
+    #         requested_peak_traffic_time,
+    #         allocation_status,
+    #         allocation_description
+    #     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    # """, (
+    #     session.get("api_key")
+    #     int(request['requested_tps']),
+    #     str(request['destinations']),
+    #     int(request.get('traffic_volume', 0)),
+    #     request.get('peak_window', '0-23'),
+    #     allocation_description
+    # ))
+
 if __name__ == "__main__":
     start_refresh_signature_scheduler()
     start_preprocess_scheduler()
