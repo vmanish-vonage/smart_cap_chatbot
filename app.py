@@ -97,7 +97,7 @@ def chat_message():
     - API Key of Customer: {session.get("api_key")}    
     - TPS Allocated: {result['total_allocated_tps']}
     - Destinations: {", ".join(allocation_data["destinations"])}
-    - Peak Window: {allocation_data.get("peak_window", "N/A")}
+    - Peak Window: {allocation_data.get("peak_window", "N/A")} in 24 hours format
     - Peak TPS: {allocation_data.get("peak_tps", "N/A")}
     - Weekly Volume: {allocation_data.get("traffic_volume", "N/A")}
     ###"""

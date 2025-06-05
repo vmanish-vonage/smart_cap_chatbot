@@ -82,8 +82,9 @@ def generate_formatted_summary(api_key, raw_summary):
     # System prompt specifically for formatting
     formatting_prompt = """
     You are a customer-friendly assistant.
-    Your job is to take a raw TPS allocation summary and return a clean, formatted version using tables.
+    Your job is to take a raw TPS allocation summary and return a clean, formatted version using nice text.
     Emphasize clarity and professionalism.
+    Use relatable emojis for all the values mentioned.
     We directly pass your response to customer, so don't include texts like, Here's a clean, formatted version of the TPS allocation summary etc. Directly start with the Summary.
     Always end the message with ###
     """
